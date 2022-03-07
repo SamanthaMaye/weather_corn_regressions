@@ -10,6 +10,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(R.matlab)
 library(rnassqs)
+library(sf)
+library(mapview)
+library(USAboundaries)
 ```
 
 ## Weather Data Analysis
@@ -20,7 +23,7 @@ library(rnassqs)
 
 # daily max temperature
 # dimensions: counties x days x years
-prism <- readMat("data/prismiowa.mat")
+prism <- readMat("~/Desktop/R/ESS580A7/prismiowa.mat")
 
 # look at county #1
 t_1981_c1 <- prism$tmaxdaily.iowa[1,,1]
@@ -80,7 +83,7 @@ summary(lm_summertmax)
 ```{r winter temps}
 
 winnewinter <- tmaxdf %>%
-  filter(countyfp==191 & doy <= 59 | doy >= 335 & !is.na(tmax)) %>%
+  filter(countyfp==191 & (doy <= 59 | doy >= 335) & !is.na(tmax)) %>%
   group_by(year) %>%
   summarize(meantmax = mean(tmax))
 
@@ -115,10 +118,10 @@ ggplot(winnewinter) +
 
 ### Download NASS corn yield data
 
-```{r yield download}
+```{r yield download, include = FALSE}
 
 # set our API key with NASS
-nassqs_auth(key = "...")
+nassqs_auth(key = "83A3A198-A1D3-3DCF-A0A9-61A918ABAEDB")
 
 # parameters to query on 
 params <- list(commodity_desc = "CORN", util_practice_desc = "GRAIN", prodn_practice_desc = "ALL PRODUCTION PRACTICES", year__GE = 1981, state_alpha = "IA")
@@ -140,16 +143,221 @@ cornyields <- tibble(cornyields)
 
 ### Question 1a: Extract Winneshiek County corn yields, fit a linear time trend, make a plot. Is there a significant time trend?
 
+```{r Question 1a}
+# Filter for Winneshiek County
+winnecorn <- cornyields %>%
+  filter(county_name == 'WINNESHIEK')
+
+# Fit a linear time trend
+lm_winnecorn <- lm(yield ~ year, winnecorn)
+summary(lm_winnecorn)
+
+# Make a Plot
+ggplot(winnecorn) + aes(x=year, y= yield) + geom_point() + geom_smooth(method = lm) + xlab('Year') + ylab('Yield') + ggtitle('Winneshiek County Corn Yield Over Time')
+
+```
+
+Yes, over time yield is increasing. 
+
 ### Question 1b: Fit a quadratic time trend (i.e., year + year^2) and make a plot. Is there evidence for slowing yield growth? 
+
+```{r Question 1b}
+# Create Year Squared Column
+winnecorn$yearsq <- winnecorn$year^2
+
+#LM Fit
+lm_winnecornquad <- lm(yield ~ year + yearsq, winnecorn)
+summary(lm_winnecornquad)
+winnecorn$fitted <- lm_winnecornquad$fitted.values
+
+# Make a Plot
+ggplot(winnecorn) +
+  geom_point(mapping = aes(x = year, y = yield)) +
+  geom_line(mapping = aes(x = year, y = fitted)) + xlab ('Year') + ylab('Yield')
+```
+
+There is not evidence to suggest slowing yield growth. 
+
 
 ### Question 2 -- Time Series: Let's analyze the relationship between temperature and yields for the Winneshiek County time series. Use data on yield and summer avg Tmax. Is adding year or Tmax^2 to your model helpful? Make a plot and interpret the results.
 
+```{r Question 2}
+# Combine Yield and Temp Data Sets
+winnecombo <- inner_join(winnecorn, winnesummer, by = 'year')
+
+# Create TMaxSq Column in Combo Data Set
+winnecombo$Tmaxsq <- winnecombo$meantmax^2
+
+# Lm for yield and temp
+lm_TempYield <- lm(yield ~ year + meantmax + Tmaxsq, winnecombo)
+summary(lm_TempYield)
+
+winnecombo$fitted <- lm_TempYield$fitted.values
+
+# Make a plot
+ggplot(winnecombo) + geom_point(mapping = aes(x= year, y= yield)) + geom_line(mapping = aes(x = year, y= fitted)) + xlab ('Year') +ylab('Yield')
+
+```
+
+Over time yield is increasing, as is temperature. This model suggests that there is a positive relationship between temperature and yield. 
+
+
 ### Question 3 -- Cross-Section: Analyze the relationship between temperature and yield across all counties in 2018. Is there a relationship? Interpret the results.
+
+```{r Question 3}
+#Filter corn for only 2018
+corn2018 <- cornyields %>%
+  filter(year == 2018) %>%
+  rename(countyfp = "county_ansi")
+
+#Filter tmaxdf for 2018, get means
+tmax2018 <- tmaxdf %>%
+  filter(year == 2018) %>%
+  filter(!is.na(tmax)) %>%
+  filter(doy >= 152 & doy <=243) %>%
+  group_by(countyfp, year) %>%
+  summarize(
+    mean = mean(tmax))
+
+#factor to numeric
+tmax2018$countyfp <- as.numeric(as.character(tmax2018$countyfp))
+
+#combine the data sets
+countyyields <- left_join(corn2018, tmax2018, by='countyfp')
+
+#plot
+ggplot(countyyields) + aes(x= mean, y= yield) + geom_point() +geom_smooth()
+
+```
+
+There is a positive relationship between yield and average temperature to a point (about 28.2 degrees) and then there is a negative relationship. So at first, as temperature increases so does yield, but then when temperature continues to increase yield begins to decrease. This could be because of the ideal temperature range of corn. Once the temperature increases beyond the ideal temperature, yields suffer. But, this could also be caused due to other factors not considered within the model such as types of management practices at different temperatures. 
 
 ### Question 4 -- Panel: One way to leverage multiple time series is to group all data into what is called a "panel" regression. Convert the county ID code ("countyfp" or "county_ansi") into factor using as.factor, then include this variable in a regression using all counties' yield and summer temperature data. How does the significance of your temperature coefficients (Tmax, Tmax^2) change? Make a plot comparing actual and fitted yields and interpret the results of your model.
 
+```{r Question 4}
+
+# prep data
+
+summertmaxdf <- tmaxdf %>%
+  filter(doy >= 152 & doy <= 243) %>%
+  group_by(countyfp, year) %>%
+  summarize(meantmax = mean(tmax)) %>%
+  rename(county_ansi = countyfp)
+
+cornyields$county_ansi <- as.factor(cornyields$county_ansi)
+
+summeryieldtemps <- left_join(summertmaxdf, cornyields, by=c('county_ansi', 'year')) %>%
+  filter(!is.na(yield))
+
+# add tmaxsq column
+
+summeryieldtemps$tmaxsq <- summeryieldtemps$meantmax^2
+
+# lm for county, yield, and temp
+
+lm_CountyTempYield <- lm(yield ~ meantmax + tmaxsq + year + county_ansi, summeryieldtemps)
+summary(lm_CountyTempYield)
+
+summeryieldtemps$fitted <- lm_CountyTempYield$fitted.values
+
+# Make a plot
+ggplot(summeryieldtemps, aes(x= yield, y= fitted)) + geom_point() + geom_smooth() + xlab ('Actual Yield') +ylab('Fitted Yield')
+
+```
+
+This fitted versus actual yields plot shows the relationship between the fitted yields (the predicted yields produced by the model) and the actual yields. This can show how capable the model is at predicting the yield of corn. The trend suggests that the model is rather capable, as it closely fits to a 1 to 1 line. Between 50 and 100 the values vary from the line slightly. 
+This also tells us the variables input into our model to have an effect on the corn's yields, so the year, temperatures, and counties have an impact on the yield of corn.
+
 ### Question 5 -- Soybeans: Download NASS data on soybean yields and explore either a time series relationship for a given county, the cross-sectional relationship for a given year, or a panel across all counties and years.
 
+```{r Question 5 download data, include=FALSE}
+# set our API key with NASS
+nassqs_auth(key = "83A3A198-A1D3-3DCF-A0A9-61A918ABAEDB")
+
+# parameters to query on 
+params2 <- list(commodity_desc = "SOYBEANS", prodn_practice_desc = "ALL PRODUCTION PRACTICES", year__GE = 1981, state_alpha = "IA")
+
+# download
+soybeansyieldsall <- nassqs_yields(params2)
+
+soybeansyieldsall$county_ansi <- as.numeric(soybeansyieldsall$county_ansi)
+soybeansyieldsall$yield <- as.numeric(soybeansyieldsall$Value)
+
+# clean and filter this dataset
+soybeansyields <- select(soybeansyieldsall, county_ansi, county_name, yield, year) %>%
+  filter(!is.na(county_ansi) & !is.na(yield))
+soybeansyields <- tibble(soybeansyields)
+
+```
+
+```{r, Question 5 explore a model}
+# Create dataset for winnesheik county for soybeans
+winnesoy <- soybeansyields %>%
+  filter(county_name == 'WINNESHIEK')
+
+# Combine Yield and Temp Data Sets
+winnesoycombo <- inner_join(winnesoy, winnesummer, by = 'year')
+
+# Create TMaxSq Column in Combo Data Set
+winnesoycombo$Tmaxsq <- winnesoycombo$meantmax^2
+
+# Lm for yield and temp
+lm_SoyTempYield <- lm(yield ~ year + meantmax + Tmaxsq, winnesoycombo)
+summary(lm_SoyTempYield)
+
+winnesoycombo$fitted <- lm_SoyTempYield$fitted.values
+
+# Make a plot
+ggplot(winnesoycombo) + geom_point(mapping = aes(x= year, y= yield)) + geom_line(mapping = aes(x = year, y= fitted)) + xlab ('Year') +ylab('Yield')
+```
+
+Over time the soybean yield is increasing, as is temperature. This model suggests that there is a positive relationship between the temperature and the yield. This was the same relationship seen with the corn model for Winnesheik county. 
+
 ### Bonus: Find a package to make a county map of Iowa displaying some sort of information about yields or weather. Interpret your map.
+```{r Bonus 1}
+states <- us_states()
+
+counties <- us_counties(states = 'Iowa')
+countiesfixed <- counties[!duplicated(as.list(counties))]
+
+countycornyields2021 <- cornyields %>%
+  rename(countyfp = 'county_ansi')  %>%
+  filter(year == '2021') 
+
+spatialcornyields2021 <- left_join(countiesfixed, countycornyields2021, by = 'countyfp')
+
+iowa <- states %>%
+  filter(name == 'Iowa') %>%
+  st_transform(2163)
+
+mapview(spatialcornyields2021, zcol = "yield")
+
+```
+
+This map shows that not every county in Iowa produced corn in 2021 (or didn't report the corn yield). The county that produced the most corn was Sac County. There is no clear spatial pattern relating to where corn is or is not produced. Overall corn is produced throughout the entire state of Iowa.
 
 ### Bonus #2: Challenge question - map trends in corn yields by county across Iowa. Interpret your map.
+
+```{r Bonus 2}
+
+countycornyields <- cornyields %>%
+  rename(countyfp = 'county_ansi') 
+spatialcornyields <- left_join(countiesfixed, countycornyields, by = 'countyfp')
+
+years <- c(1981:2021)
+
+cornmapper <- function(df, year){
+  map <- mapview(df, zcol = 'yield', at = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250))
+  print(map)
+}
+
+for (year in years){
+  cornmapper(spatialcornyields, year)
+}
+
+```
+
+I was able to create a function that creates a map of Iowa and corn yields every year of data, however I wasn't able to turn it into a single map that shows the change over time. 
+It appears that corn yields don't change drastically overtime, which means either my function is broken or the years aren't actually changing. I believe the counties that produce should change slightly and yields should change over time. 
+
+
